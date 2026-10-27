@@ -31,7 +31,7 @@ an internal network.
 | **Compose hardening** | `no-new-privileges` on all services. `cap_drop: [ALL]` and a read-only root filesystem on backend, frontend and edge nginx. Postgres and Redis sit on an `internal: true` network with no host ports, and Redis requires a password. Compose refuses to start if a required secret variable is empty. |
 | **Edge (Nginx)** | Single entry point on `:8080` with a CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy` and COOP headers. `limit_req` rate limiting is applied at the edge (20 r/s, burst 40 on `/api/`; observed working, see Metrics) and `client_max_body_size 1m`. |
 | **Frontend** | Vite + React + TypeScript + Tailwind build, served by unprivileged Nginx. Currently a single page that shows live API health. |
-| **CI pipeline** | `.github/workflows/devsecops.yml` defines 4 jobs: `secret-scan` (gitleaks); `backend` (ruff, ruff format, mypy, bandit, pip-audit, pytest + coverage); `frontend` (oxlint, build, npm audit); `containers` (image build for backend and frontend, non-root check, Trivy image and config scan). **The workflow has not run yet** because the repo has no commits or remote. |
+| **CI pipeline** | `.github/workflows/devsecops.yml` defines 4 jobs: `secret-scan` (gitleaks); `backend` (ruff, ruff format, mypy, bandit, pip-audit, pytest + coverage); `frontend` (oxlint, build, npm audit); `containers` (image build for backend and frontend, non-root check, Trivy image and config scan, `fail-fast: false`). The backend job runs the 8 integration tests against a `postgres:16` service container; in CI they fail rather than skip if the database is missing. Test secrets are generated randomly per run, and third-party actions are pinned to commit SHAs. **The first run (commit `ea88255`) failed** on gitleaks and Trivy; the fixes are verified locally but haven't been re-run on GitHub yet (see Known limitations). |
 
 ### Foreign-key choices
 
@@ -151,7 +151,7 @@ transitive) and the versions resolved in `frontend/package-lock.json`.
 | Crypto | cryptography 50.0.2 (Fernet key validation) |
 | Cache | Redis 7 (`redis:7-alpine`), running but not yet used by the app |
 | Frontend | React 19.3.1, Vite 8.3.5, Tailwind CSS 4.3.3, oxlint 1.90.0 |
-| Edge | `nginxinc/nginx-unprivileged:1.27-alpine` (edge proxy and static frontend) |
+| Edge | `nginxinc/nginx-unprivileged:1.30.6-alpine3.24` (edge proxy and static frontend) |
 | Quality / security | ruff 0.17.3, mypy 2.4.0, bandit 1.9.4, pip-audit 2.10.1, pytest 9.2.0, pytest-cov 7.1.0; gitleaks and Trivy in CI |
 
 PyJWT 2.15.1, argon2-cffi 25.1.0, PyOTP 2.10.0, qrcode 8.2 and redis-py 8.1.0 are pinned
@@ -207,7 +207,7 @@ make lint   # ruff check, ruff format --check, mypy, bandit, oxlint
 make test   # pytest with coverage (80% gate), then the frontend production build
 ```
 
-Without a database, the 8 integration tests are **skipped** (62 passed, 8 skipped).
+Locally without a database, the 8 integration tests are **skipped** (62 passed, 8 skipped). In CI (`CI=true`) they never skip.
 
 ### Integration tests (real PostgreSQL)
 
@@ -286,7 +286,7 @@ verified. **Planned** means it is not built.
 | Information disclosure | Clickjacking, MIME sniffing, XSS impact | CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy` at the edge | Implemented |
 | Information disclosure | API schema exposed in production | `/api/docs` and `/api/openapi.json` disabled when `ENVIRONMENT=production` | Implemented |
 | Information disclosure | TOTP secrets readable from the DB | Fernet-encrypted `mfa_secret_encrypted` | **Planned**: the key is validated at startup, but no encryption code exists |
-| Information disclosure | Secrets committed to git | `.env` gitignored; gitleaks in CI | `.gitignore`: Implemented. gitleaks: defined, not yet run |
+| Information disclosure | Secrets committed to git | `.env` gitignored; gitleaks on every push/PR; per-run random CI secrets | Implemented. gitleaks' first run caught a committed dummy CI key, which is now removed and allowlisted by exact fingerprint only |
 | **D**enial of service | Request floods | nginx `limit_req` (20 r/s burst 40 on `/api/`; 5 r/min on the future login path), 1 MB body cap | Implemented (edge) |
 | Denial of service | Per-user/per-route abuse behind the proxy | Redis-backed app rate limiting | **Planned**: settings exist, no code |
 | **E**levation of privilege | Container breakout or privilege gain | Non-root in all 5 services, `no-new-privileges`; `cap_drop: ALL` and read-only rootfs on backend/frontend/edge | Implemented |
@@ -304,8 +304,21 @@ verified. **Planned** means it is not built.
   Planned fix: normalise in the service layer or use `citext`.
 - **Redis is single-node** with AOF persistence and no replication or Sentinel, and the app
   does not use it yet.
-- **CI does not run the integration tests**: the workflow has no Postgres service, so those
-  8 tests are skipped there. The workflow itself has never run (no commits or remote yet).
+- **CI fixes not yet confirmed on GitHub.** The first run failed for two reasons. gitleaks
+  flagged a dummy key hardcoded in the workflow, and `aquasecurity/trivy-action@0.28.0` no
+  longer resolved, because its tags were migrated to a `v` prefix after a supply-chain attack.
+  A local reproduction also showed the old frontend base image (`nginx-unprivileged:1.27-alpine`,
+  Alpine 3.21.3) had 58 fixable HIGH/CRITICAL CVEs. All three are fixed and verified locally
+  with the same tool versions; the next push is the first real test.
+- **The compose edge proxy uses the upstream nginx image unmodified**, and CI only scans the
+  images it builds. Trivy 0.70.0 currently reports 3 fixable HIGH CVEs in it (`curl`/`libcurl`,
+  `brotli-libs`) that upstream hasn't rebuilt for yet. The frontend image patches these with
+  `apk upgrade`; the edge container does not.
+- **CI ignores CVEs that have no fix yet** (`ignore-unfixed: true`). The backend image
+  currently carries 61 such HIGH/CRITICAL findings, all from the Debian 12 base image
+  (53 `affected`, 7 `fix_deferred`, 1 `will_not_fix`; mostly `util-linux` libraries). They
+  fail the gate automatically once Debian ships a fix. Moving to `python:3.12-slim-trixie`
+  measured 44 instead of 61, which helps but isn't a fix; it's a candidate follow-up.
 - **Coverage is measured over code that exists.** The 31 placeholder modules have no
   statements, so they neither add to nor subtract from the percentage.
 - **Swagger UI won't render through the edge.** In non-production, `/api/docs` returns 200,
@@ -323,7 +336,7 @@ verified. **Planned** means it is not built.
 ## Metrics (measured)
 
 Measured **2026-10-27** on an Apple M2 with 8 GB RAM, macOS 26.6, Docker 29.5.3
-(Docker Desktop). Git commit: **uncommitted** (the repository has no commits yet).
+(Docker Desktop). Git commit: measured on uncommitted changes on top of `ea88255`.
 
 | Metric | Value |
 | --- | --- |
@@ -342,7 +355,10 @@ Measured **2026-10-27** on an Apple M2 with 8 GB RAM, macOS 26.6, Docker 29.5.3
 | npm audit | 0 vulnerabilities |
 | oxlint | exit 0, no findings |
 | Image `aegis-backend` | 439 MB (`docker image ls`) · 94.4 MB (`docker image inspect .Size`) · `USER 10001:10001` |
-| Image `aegis-frontend` | 76.3 MB (`docker image ls`) · 21.9 MB (`docker image inspect .Size`) · `USER 101` |
+| Image `aegis-frontend` | 97.1 MB (`docker image ls`) · 27.9 MB (`docker image inspect .Size`) · `USER 101` |
+| Trivy 0.70.0, HIGH/CRITICAL **with a fix available** (the CI gate) | backend 0 · frontend 0 · Dockerfile config scans: 0 |
+| Trivy 0.70.0, HIGH/CRITICAL **with no fix released** | backend 61 (59 HIGH, 2 CRITICAL), all inherited from `python:3.12-slim-bookworm` · frontend 0 |
+| actionlint 1.7.12 | 0 errors |
 | Runtime process uids | backend 10001 · frontend 101 · nginx 101 · postgres 70 · redis 999 (no root processes) |
 | Edge rate limit, one observed run | 100 parallel `GET /api/health` → 45 × 200, 55 × 429 (timing-dependent, not a benchmark) |
 | CI jobs defined | 4 (`secret-scan`, `backend`, `frontend`, `containers`; `containers` is a 2-way matrix) |
@@ -386,6 +402,15 @@ for s in postgres redis backend frontend nginx; do docker compose top $s; done
 seq 100 | xargs -P 50 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
   http://localhost:8080/api/health | sort | uniq -c
 
+# Container scans (same Trivy version and flags as CI)
+docker build -t aegis-frontend:ci frontend   # likewise backend
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.70.0 \
+  image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 aegis-frontend:ci
+docker run --rm -v "$PWD":/src:ro aquasec/trivy:0.70.0 config --severity CRITICAL,HIGH /src/frontend
+
+# Workflow lint
+docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12
+
 # CI jobs: top-level keys under `jobs:` in .github/workflows/devsecops.yml
 ```
 
@@ -411,8 +436,7 @@ seq 100 | xargs -P 50 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
 | Case-insensitive email uniqueness | Not started |
 | Demo data seed script (`make seed`) | Not started. Target exits with "not implemented yet" |
 | Benchmark script (`make bench`) | Not started. Target exits with "not implemented yet" |
-| Integration tests in CI (Postgres service) | Not started |
-| First CI run on GitHub | Pending. No commits or remote yet |
+| First green CI run on GitHub | Pending. First run failed; fixes verified locally, not yet pushed |
 
 ---
 

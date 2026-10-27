@@ -1,0 +1,4 @@
+# Reviewed false positives only. Each entry is one exact finding fingerprint, never a path/rule-wide allowlist.
+# CI-only dummy Fernet key (base64 of "ci-only-fernet-key-not-for-prod-") hardcoded in the first commit;
+# removed from the workflow, which now generates random per-run test secrets. Never a real secret.
+ea88255d591055d527461ddaf61cb5ec457f173e:.github/workflows/devsecops.yml:generic-api-key:41

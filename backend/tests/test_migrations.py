@@ -1,7 +1,8 @@
 """Integration tests: Alembic round-trip and DB-level audit log immutability.
 
-Opt-in: set AEGIS_TEST_DATABASE_URL to a *disposable* PostgreSQL database. The tests
-downgrade it to base (dropping every table) before and after running.
+Opt-in locally: set AEGIS_TEST_DATABASE_URL to a *disposable* PostgreSQL database. The
+tests downgrade it to base (dropping every table) before and after running. In CI (CI=true)
+they are never skipped, so a missing database fails the build instead of passing silently.
 """
 
 import os
@@ -16,10 +17,11 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from alembic import command
 
 TEST_DB_URL = os.environ.get("AEGIS_TEST_DATABASE_URL")
+IN_CI = os.environ.get("CI", "").lower() == "true"
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not TEST_DB_URL, reason="AEGIS_TEST_DATABASE_URL not set"),
+    pytest.mark.skipif(not TEST_DB_URL and not IN_CI, reason="AEGIS_TEST_DATABASE_URL not set"),
 ]
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
@@ -38,7 +40,8 @@ def _migrate(engine: Engine, action: str) -> None:
 
 @pytest.fixture(scope="module")
 def engine() -> Iterator[Engine]:
-    assert TEST_DB_URL is not None
+    if TEST_DB_URL is None:
+        pytest.fail("AEGIS_TEST_DATABASE_URL must be set in CI; integration tests may not skip")
     eng = create_engine(TEST_DB_URL)
     _migrate(eng, "downgrade")
     _migrate(eng, "upgrade")
