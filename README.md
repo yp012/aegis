@@ -1,5 +1,7 @@
 # Aegis
 
+[![DevSecOps](https://github.com/yp012/aegis/actions/workflows/devsecops.yml/badge.svg?branch=main)](https://github.com/yp012/aegis/actions/workflows/devsecops.yml)
+
 **Zero-Trust Access Control & Clearance Management Portal.** A security-focused full-stack
 project for managing who may enter which physical zone, based on role, clearance tier, and
 explicit time-bound grants, with a tamper-resistant audit trail. The finished system will
@@ -9,7 +11,8 @@ an internal network.
 > **Status: work in progress. The foundation is complete; auth, the policy engine, the
 > audit chain, and the UI are still being built.**
 > Today the repo contains the database schema and its integrity guarantees, the
-> configuration layer, the container/edge setup, and the CI pipeline definition. It has no
+> configuration layer, the container/edge setup, and a DevSecOps CI pipeline that passes on
+> GitHub ([run 40604518785](https://github.com/yp012/aegis/actions/runs/40604518785), all 5 job runs green). It has no
 > login, no API endpoints beyond a health check, and the UI is a status page. Everything
 > unbuilt is listed under [Roadmap](#roadmap-not-yet-implemented). Every number in this file
 > was measured by a command shown in [How these were measured](#how-these-were-measured).
@@ -31,7 +34,7 @@ an internal network.
 | **Compose hardening** | `no-new-privileges` on all services. `cap_drop: [ALL]` and a read-only root filesystem on backend, frontend and edge nginx. Postgres and Redis sit on an `internal: true` network with no host ports, and Redis requires a password. Compose refuses to start if a required secret variable is empty. |
 | **Edge (Nginx)** | Single entry point on `:8080` with a CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy` and COOP headers. `limit_req` rate limiting is applied at the edge (20 r/s, burst 40 on `/api/`; observed working, see Metrics) and `client_max_body_size 1m`. |
 | **Frontend** | Vite + React + TypeScript + Tailwind build, served by unprivileged Nginx. Currently a single page that shows live API health. |
-| **CI pipeline** | `.github/workflows/devsecops.yml` defines 4 jobs: `secret-scan` (gitleaks); `backend` (ruff, ruff format, mypy, bandit, pip-audit, pytest + coverage); `frontend` (oxlint, build, npm audit); `containers` (image build for backend and frontend, non-root check, Trivy image and config scan, `fail-fast: false`). The backend job runs the 8 integration tests against a `postgres:16` service container; in CI they fail rather than skip if the database is missing. Test secrets are generated randomly per run, and third-party actions are pinned to commit SHAs. **The first run (commit `ea88255`) failed** on gitleaks and Trivy; the fixes are verified locally but haven't been re-run on GitHub yet (see Known limitations). |
+| **CI pipeline** | `.github/workflows/devsecops.yml` defines 4 jobs: `secret-scan` (gitleaks); `backend` (ruff, ruff format, mypy, bandit, pip-audit, pytest + coverage); `frontend` (oxlint, build, npm audit); `containers` (image build for backend and frontend, non-root check, Trivy image and config scan, `fail-fast: false`). The backend job runs the 8 integration tests against a `postgres:16` service container; in CI they fail rather than skip if the database is missing. Test secrets are generated randomly per run, and third-party actions are pinned to commit SHAs. [Run 40604518785](https://github.com/yp012/aegis/actions/runs/40604518785) on commit `65b0112` passed all 5 job runs. Its backend job reported `70 passed`, including all 8 PostgreSQL integration tests. |
 
 ### Foreign-key choices
 
@@ -236,7 +239,7 @@ files in `backend/app`, 15 contain code and 31 are placeholders.
 
 ```text
 .
-├── .github/workflows/devsecops.yml    ● 4-job DevSecOps pipeline (not yet run)
+├── .github/workflows/devsecops.yml    ● 4-job DevSecOps pipeline (green on `65b0112`)
 ├── backend
 │   ├── alembic/
 │   │   ├── env.py                     ● settings-driven; accepts an injected connection
@@ -304,12 +307,10 @@ verified. **Planned** means it is not built.
   Planned fix: normalise in the service layer or use `citext`.
 - **Redis is single-node** with AOF persistence and no replication or Sentinel, and the app
   does not use it yet.
-- **CI fixes not yet confirmed on GitHub.** The first run failed for two reasons. gitleaks
-  flagged a dummy key hardcoded in the workflow, and `aquasecurity/trivy-action@0.28.0` no
-  longer resolved, because its tags were migrated to a `v` prefix after a supply-chain attack.
-  A local reproduction also showed the old frontend base image (`nginx-unprivileged:1.27-alpine`,
-  Alpine 3.21.3) had 58 fixable HIGH/CRITICAL CVEs. All three are fixed and verified locally
-  with the same tool versions; the next push is the first real test.
+- **gitleaks on push scans only the pushed commits.** In run 40604518785 it ran with
+  `--log-opts=-1` and scanned 1 commit. A full-history scan happens only on a manual
+  `workflow_dispatch` run, and none has been run on GitHub yet. (A local full-history scan
+  with the same gitleaks version, 8.24.3, found no leaks.)
 - **The compose edge proxy uses the upstream nginx image unmodified**, and CI only scans the
   images it builds. Trivy 0.70.0 currently reports 3 fixable HIGH CVEs in it (`curl`/`libcurl`,
   `brotli-libs`) that upstream hasn't rebuilt for yet. The frontend image patches these with
@@ -336,7 +337,9 @@ verified. **Planned** means it is not built.
 ## Metrics (measured)
 
 Measured **2026-10-27** on an Apple M2 with 8 GB RAM, macOS 26.6, Docker 29.5.3
-(Docker Desktop). Git commit: measured on uncommitted changes on top of `ea88255`.
+(Docker Desktop). The local measurements were taken on the exact tree committed as
+[`65b0112`](https://github.com/yp012/aegis/commit/65b011298c38a84bae20f903dd49a2390fbab069).
+The CI rows come from GitHub Actions [run 40604518785](https://github.com/yp012/aegis/actions/runs/40604518785) on that same commit.
 
 | Metric | Value |
 | --- | --- |
@@ -362,6 +365,14 @@ Measured **2026-10-27** on an Apple M2 with 8 GB RAM, macOS 26.6, Docker 29.5.3
 | Runtime process uids | backend 10001 · frontend 101 · nginx 101 · postgres 70 · redis 999 (no root processes) |
 | Edge rate limit, one observed run | 100 parallel `GET /api/health` → 45 × 200, 55 × 429 (timing-dependent, not a benchmark) |
 | CI jobs defined | 4 (`secret-scan`, `backend`, `frontend`, `containers`; `containers` is a 2-way matrix) |
+| **CI run** ([40604518785](https://github.com/yp012/aegis/actions/runs/40604518785), commit `65b0112`, 2026-10-27) | **success: 5 of 5 job runs green** |
+| CI backend pytest (against a `postgres:16` service) | `70 passed in 1.85s`, with no skipped tests reported (all 8 `test_migrations.py` tests ran); coverage 98.98% |
+| CI backend static analysis | ruff: all checks passed · format: 55 files already formatted · mypy: no issues in 54 source files · bandit: no issues identified · pip-audit: no known vulnerabilities |
+| CI frontend | oxlint: 0 warnings and 0 errors · build succeeded · npm audit: 0 vulnerabilities |
+| CI Trivy v0.70.0 (`ignore-unfixed`, HIGH/CRITICAL) | backend image (Debian 12.15): 0 · frontend image (Alpine 3.24.2): 0 · Dockerfile config scans: 0 for both |
+| CI non-root image check | backend `10001:10001` · frontend `101` |
+| CI gitleaks 8.24.3 | no leaks found (1 commit scanned) |
+| CI history | The first run (commit `ea88255`) failed in two jobs: gitleaks flagged a dummy key hardcoded in the workflow, and `trivy-action@0.28.0` no longer resolved after the action's tags were migrated following a supply-chain attack. A local reproduction also found 58 fixable HIGH/CRITICAL CVEs in the old `nginx-unprivileged:1.27-alpine` base. All were fixed in `65b0112`. |
 
 ### How these were measured
 
@@ -408,6 +419,10 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.70.
   image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 aegis-frontend:ci
 docker run --rm -v "$PWD":/src:ro aquasec/trivy:0.70.0 config --severity CRITICAL,HIGH /src/frontend
 
+# CI results (per-job logs of the GitHub run)
+gh run view 40604518785 --json jobs --jq '.jobs[] | "\(.name) | \(.conclusion)"'
+gh run view 40604518785 --log --job <job-id> | grep -E 'passed|Total coverage|no leaks|Report Summary'
+
 # Workflow lint
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12
 
@@ -436,7 +451,6 @@ docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12
 | Case-insensitive email uniqueness | Not started |
 | Demo data seed script (`make seed`) | Not started. Target exits with "not implemented yet" |
 | Benchmark script (`make bench`) | Not started. Target exits with "not implemented yet" |
-| First green CI run on GitHub | Pending. First run failed; fixes verified locally, not yet pushed |
 
 ---
 
@@ -452,6 +466,8 @@ docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12
   The suite has 70 passing tests at 98.98% coverage of the implemented backend code.
 - Containerised a 5-service stack where every process runs non-root, with capabilities
   dropped and read-only filesystems on the app and edge containers, an internal-only data
-  network, and an Nginx edge with CSP and rate limiting. Defined a 4-job GitHub Actions
-  DevSecOps pipeline (gitleaks, ruff, mypy, bandit, pip-audit, npm audit, Trivy); bandit,
-  pip-audit and npm audit report 0 issues locally.
+  network, and an Nginx edge with CSP and rate limiting. Built a 4-job GitHub Actions
+  DevSecOps pipeline (gitleaks, ruff, mypy, bandit, pip-audit, npm audit, Trivy) that runs
+  green on `main`, including PostgreSQL integration tests. Its last run found 0 leaks,
+  0 bandit issues, 0 known vulnerable dependencies and 0 fixable HIGH/CRITICAL image CVEs.
+  Third-party actions are pinned to commit SHAs.
