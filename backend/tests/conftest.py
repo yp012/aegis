@@ -3,8 +3,12 @@
 import os
 from collections.abc import Iterator
 
+import fakeredis
 import pytest
 from fastapi.testclient import TestClient
+from redis import Redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://aegis:aegis@localhost:5432/aegis_test")
@@ -20,8 +24,33 @@ os.environ.setdefault("MFA_ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def fake_redis() -> Iterator[Redis]:
+    """In-memory Redis with Lua support (lupa); a fresh server per test."""
+    server = fakeredis.FakeServer()
+    client = fakeredis.FakeRedis(server=server, decode_responses=True)
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+def unreachable_redis() -> Redis:
+    """A client for a Redis that is down: loopback port 1 refuses at once; no retries."""
+    return Redis(
+        host="127.0.0.1",
+        port=1,
+        socket_connect_timeout=0.5,
+        socket_timeout=0.5,
+        retry=Retry(NoBackoff(), 0),
+    )
+
+
+@pytest.fixture
+def client(fake_redis: Redis) -> Iterator[TestClient]:
+    from app.core.redis import get_redis
     from app.main import create_app
 
-    with TestClient(create_app()) as test_client:
+    app = create_app()
+    app.dependency_overrides[get_redis] = lambda: fake_redis
+    with TestClient(app) as test_client:
         yield test_client

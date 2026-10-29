@@ -4,6 +4,8 @@
 bandit==1.9.4
 fakeredis==2.40.0
 httpx==0.28.1
+# Lua runtime so fakeredis can execute the rate-limiter and token-rotation scripts.
+lupa==2.8
 mypy==2.4.0
 pip-audit==2.10.1
 pytest==9.2.0

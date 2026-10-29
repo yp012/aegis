@@ -78,6 +78,8 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-}
       DEBUG: ${DEBUG:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Only the edge proxy's pinned address may set X-Forwarded-For (see networks.edge).
+      TRUSTED_PROXIES: ${NGINX_EDGE_IP:-172.29.53.10}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-}
       ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-}
       REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-}
@@ -126,12 +128,18 @@ services:
     tmpfs:
       - /tmp
     cap_drop: [ALL]
-    networks: [edge]
+    networks:
+      edge:
+        # Fixed so the backend can trust X-Forwarded-For from this address and no other.
+        ipv4_address: ${NGINX_EDGE_IP:-172.29.53.10}
 
 networks:
   backend:
     internal: true
   edge:
+    ipam:
+      config:
+        - subnet: ${EDGE_SUBNET:-172.29.53.0/24}
 
 volumes:
   pgdata:

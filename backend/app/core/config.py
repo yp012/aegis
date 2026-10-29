@@ -1,7 +1,9 @@
 """Application settings loaded exclusively from environment variables."""
 
+import ipaddress
 from functools import lru_cache
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -43,6 +45,13 @@ class Settings(BaseSettings):
         default="http://localhost:5173",
         description="Comma-separated list of allowed CORS origins.",
     )
+    trusted_proxies: str = Field(
+        default="",
+        description=(
+            "Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For is trusted. "
+            "Empty means the TCP peer address is always used."
+        ),
+    )
 
     # The API connects as the restricted `aegis_app` role, never as the schema owner.
     app_database_url: str
@@ -62,7 +71,7 @@ class Settings(BaseSettings):
     )
 
     rate_limit_enabled: bool = True
-    rate_limit_default_requests: int = Field(default=100, ge=1)
+    rate_limit_default_requests: int = Field(default=120, ge=1)
     rate_limit_default_window_seconds: int = Field(default=60, ge=1)
     rate_limit_login_requests: int = Field(default=5, ge=1)
     rate_limit_login_window_seconds: int = Field(default=60, ge=1)
@@ -82,6 +91,31 @@ class Settings(BaseSettings):
             raise ValueError("must be a valid Fernet key (32 url-safe base64 bytes)") from exc
         return value
 
+    @field_validator("cors_origins")
+    @classmethod
+    def _strict_cors_origins(cls, value: str) -> str:
+        for origin in (o.strip() for o in value.split(",")):
+            if not origin:
+                continue
+            parts = urlsplit(origin)
+            # Credentialed CORS with a wildcard or a path/query would be ambiguous or unsafe.
+            if (
+                parts.scheme not in {"http", "https"}
+                or not parts.netloc
+                or "*" in origin
+                or parts.path
+                or parts.query
+                or parts.fragment
+            ):
+                raise ValueError(f"invalid CORS origin {origin!r}; use scheme://host[:port]")
+        return value
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _valid_trusted_proxies(cls, value: str) -> str:
+        _parse_networks(value)
+        return value
+
     @model_validator(mode="after")
     def _production_hardening(self) -> Self:
         if self.environment == "production" and not self.cookie_secure:
@@ -91,6 +125,17 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def trusted_proxy_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        return _parse_networks(self.trusted_proxies)
+
+
+def _parse_networks(value: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    try:
+        return [ipaddress.ip_network(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError("TRUSTED_PROXIES must be comma-separated IP addresses or CIDRs") from exc
 
 
 class MigrationSettings(BaseSettings):

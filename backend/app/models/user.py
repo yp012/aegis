@@ -14,6 +14,7 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = (
         CheckConstraint("failed_login_count >= 0", name="failed_login_count_non_negative"),
+        CheckConstraint("email = lower(email)", name="email_lowercase"),
         CheckConstraint(
             "NOT mfa_enabled OR mfa_secret_encrypted IS NOT NULL",
             name="mfa_enabled_requires_secret",
