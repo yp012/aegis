@@ -1,54 +1,30 @@
 """Integration tests: Alembic round-trip and DB-level audit log immutability.
 
-Opt-in locally: set AEGIS_TEST_DATABASE_URL to a *disposable* PostgreSQL database. The
-tests downgrade it to base (dropping every table) before and after running. In CI (CI=true)
-they are never skipped, so a missing database fails the build instead of passing silently.
+See tests/pg.py for how to enable these locally; they run against the schema owner.
 """
 
-import os
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from alembic import command
+from tests.pg import integration, migrate, require_test_db_url, sqlstate
 
-TEST_DB_URL = os.environ.get("AEGIS_TEST_DATABASE_URL")
-IN_CI = os.environ.get("CI", "").lower() == "true"
+pytestmark = integration
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skipif(not TEST_DB_URL and not IN_CI, reason="AEGIS_TEST_DATABASE_URL not set"),
-]
-
-ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 RESTRICT_VIOLATION = "23001"
-
-
-def _migrate(engine: Engine, action: str) -> None:
-    cfg = Config(str(ALEMBIC_INI))
-    with engine.begin() as conn:
-        cfg.attributes["connection"] = conn
-        if action == "upgrade":
-            command.upgrade(cfg, "head")
-        else:
-            command.downgrade(cfg, "base")
 
 
 @pytest.fixture(scope="module")
 def engine() -> Iterator[Engine]:
-    if TEST_DB_URL is None:
-        pytest.fail("AEGIS_TEST_DATABASE_URL must be set in CI; integration tests may not skip")
-    eng = create_engine(TEST_DB_URL)
-    _migrate(eng, "downgrade")
-    _migrate(eng, "upgrade")
+    eng = create_engine(require_test_db_url())
+    migrate(eng, "downgrade")
+    migrate(eng, "upgrade")
     try:
         yield eng
     finally:
-        _migrate(eng, "downgrade")
+        migrate(eng, "downgrade")
         eng.dispose()
 
 
@@ -64,10 +40,6 @@ def seeded(engine: Engine) -> Engine:
     return engine
 
 
-def _sqlstate(exc: DBAPIError) -> str | None:
-    return getattr(exc.orig, "sqlstate", None)
-
-
 @pytest.mark.parametrize(
     "statement",
     [
@@ -80,7 +52,7 @@ def _sqlstate(exc: DBAPIError) -> str | None:
 def test_audit_log_rejects_mutation(seeded: Engine, statement: str) -> None:
     with pytest.raises(DBAPIError) as excinfo, seeded.begin() as conn:
         conn.execute(text(statement))
-    assert _sqlstate(excinfo.value) == RESTRICT_VIOLATION
+    assert sqlstate(excinfo.value) == RESTRICT_VIOLATION
     assert "append-only" in str(excinfo.value)
 
     with seeded.connect() as conn:
@@ -139,7 +111,7 @@ def test_pg_clearance_ordering(engine: Engine) -> None:
 
 
 def test_downgrade_then_upgrade_round_trips(engine: Engine) -> None:
-    _migrate(engine, "downgrade")
+    migrate(engine, "downgrade")
     with engine.connect() as conn:
         leftovers = conn.execute(
             text(
@@ -148,11 +120,12 @@ def test_downgrade_then_upgrade_round_trips(engine: Engine) -> None:
                 " + (SELECT count(*) FROM pg_type t JOIN pg_namespace n "
                 "    ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typtype = 'e')"
                 " + (SELECT count(*) FROM pg_proc WHERE proname = 'audit_logs_reject_mutation')"
+                " + (SELECT count(*) FROM pg_roles WHERE rolname = 'aegis_app')"
             )
         ).scalar_one()
     assert leftovers == 0
 
-    _migrate(engine, "upgrade")
+    migrate(engine, "upgrade")
     with engine.connect() as conn:
         trigger = conn.execute(
             text(
@@ -160,4 +133,8 @@ def test_downgrade_then_upgrade_round_trips(engine: Engine) -> None:
                 "WHERE tgname = 'audit_log_immutable' AND tgrelid = 'audit_logs'::regclass"
             )
         ).scalar_one()
+        app_role = conn.execute(
+            text("SELECT count(*) FROM pg_roles WHERE rolname = 'aegis_app'")
+        ).scalar_one()
     assert trigger == 1
+    assert app_role == 1

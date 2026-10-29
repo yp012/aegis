@@ -51,6 +51,8 @@ jobs:
     env:
       ENVIRONMENT: test
       DATABASE_URL: postgresql+psycopg://aegis:aegis@localhost:5432/aegis_test
+      # The tests log in as aegis_app with the generated APP_DB_PASSWORD (tests/test_app_role.py).
+      APP_DATABASE_URL: postgresql+psycopg://aegis_app@localhost:5432/aegis_test
       # Enables tests/test_migrations.py (trigger, constraints, migration round-trip).
       # The service database is disposable; the tests downgrade it to base.
       AEGIS_TEST_DATABASE_URL: postgresql+psycopg://aegis:aegis@localhost:5432/aegis_test
@@ -65,7 +67,7 @@ jobs:
       - name: Generate ephemeral test secrets
         # Random per run, so no key material is committed (and nothing for gitleaks to flag).
         run: |
-          for name in JWT_SECRET BADGE_HMAC_SECRET MFA_ENCRYPTION_KEY; do
+          for name in JWT_SECRET BADGE_HMAC_SECRET MFA_ENCRYPTION_KEY APP_DB_PASSWORD; do
             value="$(python -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')"
             echo "::add-mask::${value}"
             echo "${name}=${value}" >> "${GITHUB_ENV}"

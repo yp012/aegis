@@ -39,21 +39,57 @@ services:
       timeout: 3s
       retries: 10
 
+  # One-shot job: applies migrations as the schema owner (POSTGRES_USER) and creates/updates
+  # the restricted aegis_app role. Only this container ever sees the owner credential.
+  migrate:
+    <<: *hardening
+    build:
+      context: ./backend
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    networks: [backend]
+
   backend:
     <<: *hardening
     build:
       context: ./backend
-    env_file: .env
-    # Interpolated here so `docker compose up` fails before any container starts if a
-    # required secret is missing; length/format checks happen in app/core/config.py.
+    # Explicit allowlist (no env_file): the API gets the restricted aegis_app URL and never
+    # the owner DATABASE_URL, POSTGRES_PASSWORD or APP_DB_PASSWORD. Required secrets are
+    # interpolated with :? so `docker compose up` fails before any container starts if one is
+    # missing; length/format checks happen in app/core/config.py. Optional settings are
+    # passed as empty when unset, which the app treats as "use the default".
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      APP_DATABASE_URL: ${APP_DATABASE_URL:?APP_DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       BADGE_HMAC_SECRET: ${BADGE_HMAC_SECRET:?BADGE_HMAC_SECRET is required}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?MFA_ENCRYPTION_KEY is required}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      ENVIRONMENT: ${ENVIRONMENT:-}
+      DEBUG: ${DEBUG:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-}
+      ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-}
+      REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-}
+      BADGE_TTL_MINUTES: ${BADGE_TTL_MINUTES:-}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-}
+      RATE_LIMIT_DEFAULT_REQUESTS: ${RATE_LIMIT_DEFAULT_REQUESTS:-}
+      RATE_LIMIT_DEFAULT_WINDOW_SECONDS: ${RATE_LIMIT_DEFAULT_WINDOW_SECONDS:-}
+      RATE_LIMIT_LOGIN_REQUESTS: ${RATE_LIMIT_LOGIN_REQUESTS:-}
+      RATE_LIMIT_LOGIN_WINDOW_SECONDS: ${RATE_LIMIT_LOGIN_WINDOW_SECONDS:-}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

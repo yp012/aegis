@@ -6,11 +6,12 @@ from sqlalchemy import Connection, engine_from_config, pool
 
 import app.models  # noqa: F401  (registers all models on Base.metadata)
 from alembic import context
-from app.core.config import get_settings
+from app.core.config import get_migration_settings
 from app.db.base import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+# Migrations run as the schema owner (DATABASE_URL); the API uses APP_DATABASE_URL.
+config.set_main_option("sqlalchemy.url", get_migration_settings().database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

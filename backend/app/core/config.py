@@ -11,15 +11,29 @@ _MIN_SECRET_LENGTH = 32
 _PLACEHOLDER_PREFIX = "CHANGE_ME"
 
 
+_SETTINGS_CONFIG = SettingsConfigDict(
+    env_file=".env",
+    env_file_encoding="utf-8",
+    case_sensitive=False,
+    extra="ignore",
+    # Compose passes optional variables as `${VAR:-}`; treat empty as unset so defaults apply.
+    env_ignore_empty=True,
+    # Never echo (possibly real) secret values into startup logs on validation failure.
+    hide_input_in_errors=True,
+)
+
+
+def _check_secret(raw: str) -> None:
+    if raw.startswith(_PLACEHOLDER_PREFIX):
+        raise ValueError("still set to the .env.example placeholder; generate a real secret")
+    if len(raw) < _MIN_SECRET_LENGTH:
+        raise ValueError(f"must be at least {_MIN_SECRET_LENGTH} characters")
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-        # Never echo (possibly real) secret values into startup logs on validation failure.
-        hide_input_in_errors=True,
-    )
+    """Runtime settings for the API process."""
+
+    model_config = _SETTINGS_CONFIG
 
     app_name: str = "Aegis"
     environment: Literal["development", "test", "production"] = "development"
@@ -30,7 +44,8 @@ class Settings(BaseSettings):
         description="Comma-separated list of allowed CORS origins.",
     )
 
-    database_url: str
+    # The API connects as the restricted `aegis_app` role, never as the schema owner.
+    app_database_url: str
     redis_url: str
 
     jwt_secret: SecretStr
@@ -55,11 +70,7 @@ class Settings(BaseSettings):
     @field_validator("jwt_secret", "badge_hmac_secret", "mfa_encryption_key")
     @classmethod
     def _secret_min_length(cls, value: SecretStr) -> SecretStr:
-        raw = value.get_secret_value()
-        if raw.startswith(_PLACEHOLDER_PREFIX):
-            raise ValueError("still set to the .env.example placeholder; generate a real secret")
-        if len(raw) < _MIN_SECRET_LENGTH:
-            raise ValueError(f"must be at least {_MIN_SECRET_LENGTH} characters")
+        _check_secret(value.get_secret_value())
         return value
 
     @field_validator("mfa_encryption_key")
@@ -82,6 +93,33 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
+class MigrationSettings(BaseSettings):
+    """Settings for Alembic only. Kept separate so the API never needs owner credentials."""
+
+    model_config = _SETTINGS_CONFIG
+
+    # Schema-owner connection used to run DDL.
+    database_url: str
+    # Password the migrations assign to the restricted `aegis_app` login role.
+    app_db_password: SecretStr
+
+    @field_validator("app_db_password")
+    @classmethod
+    def _password_strength(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value()
+        _check_secret(raw)
+        # SCRAM normalises non-ASCII passwords with SASLprep; restricting to printable ASCII
+        # keeps the verifier computed in app/db/scram.py identical to the server's.
+        if not (raw.isascii() and raw.isprintable()):
+            raise ValueError("must contain printable ASCII characters only")
+        return value
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache
+def get_migration_settings() -> MigrationSettings:
+    return MigrationSettings()
