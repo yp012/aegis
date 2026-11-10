@@ -6,6 +6,7 @@ and the browser sends it nowhere else. Failures use one generic message per endp
 responses do not reveal whether an account exists, is locked or is disabled.
 """
 
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
@@ -38,7 +39,7 @@ from app.schemas.auth import (
     TokenResponse,
 )
 from app.schemas.user import UserRead
-from app.services import auth_service, mfa_service
+from app.services import audit_chain, auth_service, mfa_service
 from app.services.auth_service import AuthenticationError, IssuedSession
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -103,10 +104,12 @@ def register(
     """Create a user. Open only while no user exists (the bootstrap Admin); Admin-only after."""
     db.execute(select(func.pg_advisory_xact_lock(_BOOTSTRAP_LOCK_ID)))
     bootstrap = db.scalar(select(func.count()).select_from(User)) == 0
+    actor_id: uuid.UUID | None = None
     if not bootstrap:
         actor = get_current_user(get_access_claims(credentials, redis), db)
         if actor.role != Role.Admin:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient privileges")
+        actor_id = actor.id
 
     email = auth_service.normalize_email(payload.email)
     if db.scalar(select(User.id).where(User.email == email)) is not None:
@@ -120,6 +123,14 @@ def register(
     )
     db.add(user)
     try:
+        db.flush()
+        audit_chain.append(
+            db,
+            actor_id,
+            "user.bootstrap" if bootstrap else "user.create",
+            f"users/{user.id}",
+            {"email": user.email, "role": user.role, "clearance": user.clearance},
+        )
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -178,6 +189,8 @@ def mfa_verify_setup(
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     if not confirmed:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code")
+    audit_chain.append(db, user.id, "user.mfa.enable", f"users/{user.id}", {})
+    db.commit()
     return MfaStatusResponse(mfa_enabled=True)
 
 

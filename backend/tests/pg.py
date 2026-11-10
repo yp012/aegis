@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 from sqlalchemy.exc import DBAPIError
 
 from alembic import command
@@ -44,3 +44,21 @@ def migrate(engine: Engine, action: str) -> None:
 
 def sqlstate(exc: DBAPIError) -> str | None:
     return getattr(exc.orig, "sqlstate", None)
+
+
+def reset_data(engine: Engine) -> None:
+    """Empty every domain table, audit trail included (test databases only).
+
+    The audit trail is append-only by trigger and its actor FK is RESTRICT, so users with
+    audit history cannot be deleted. As the schema owner, the trigger is switched off for
+    this one transaction; a failure rolls the ALTERs back with everything else.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE audit_logs DISABLE TRIGGER audit_log_immutable"))
+        conn.execute(
+            text(
+                "TRUNCATE audit_logs, access_events, zone_access_grants, badges, visitors, "
+                "zones, users RESTART IDENTITY"
+            )
+        )
+        conn.execute(text("ALTER TABLE audit_logs ENABLE TRIGGER audit_log_immutable"))

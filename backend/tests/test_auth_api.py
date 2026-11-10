@@ -22,7 +22,7 @@ from app.core.redis import get_redis
 from app.db.session import get_db
 from app.main import create_app
 from app.services import auth_service
-from tests.pg import integration, migrate, require_test_db_url
+from tests.pg import integration, migrate, require_test_db_url, reset_data
 
 pytestmark = integration
 
@@ -62,8 +62,7 @@ def api(
     fake_redis: Redis,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[TestClient]:
-    with owner_engine.begin() as conn:
-        conn.execute(text("DELETE FROM users"))
+    reset_data(owner_engine)
     # Most tests make many logins; the 429 test lowers this again.
     monkeypatch.setattr(get_settings(), "rate_limit_login_requests", 1000)
     factory = sessionmaker(bind=app_engine, autoflush=False, expire_on_commit=False)
