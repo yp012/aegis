@@ -373,7 +373,8 @@ def test_update_unknown_user_is_404(api: TestClient, cast: Cast) -> None:
 
 
 def test_registration_is_audited(api: TestClient, cast: Cast, owner_engine: Engine) -> None:
-    log = _audit(owner_engine)
+    # Each _create also logs the new user in, which writes its own auth.login entry.
+    log = [e for e in _audit(owner_engine) if e["action"].startswith("user.")]
     assert [e["action"] for e in log] == ["user.bootstrap"] + ["user.create"] * 3
     assert log[0]["actor_id"] is None
     assert all(e["actor_id"] == cast.admin.id for e in log[1:])

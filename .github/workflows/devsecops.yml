@@ -67,7 +67,7 @@ jobs:
       - name: Generate ephemeral test secrets
         # Random per run, so no key material is committed (and nothing for gitleaks to flag).
         run: |
-          for name in JWT_SECRET BADGE_HMAC_SECRET MFA_ENCRYPTION_KEY APP_DB_PASSWORD; do
+          for name in JWT_SECRET BADGE_HMAC_SECRET AUDIT_HMAC_SECRET MFA_ENCRYPTION_KEY APP_DB_PASSWORD; do
             value="$(python -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')"
             echo "::add-mask::${value}"
             echo "${name}=${value}" >> "${GITHUB_ENV}"

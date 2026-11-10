@@ -57,8 +57,8 @@ def reset_data(engine: Engine) -> None:
         conn.execute(text("ALTER TABLE audit_logs DISABLE TRIGGER audit_log_immutable"))
         conn.execute(
             text(
-                "TRUNCATE audit_logs, access_events, zone_access_grants, badges, visitors, "
-                "zones, users RESTART IDENTITY"
+                "TRUNCATE audit_logs, audit_checkpoint, access_events, zone_access_grants, "
+                "badges, visitors, zones, users"
             )
         )
         conn.execute(text("ALTER TABLE audit_logs ENABLE TRIGGER audit_log_immutable"))

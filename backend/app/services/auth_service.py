@@ -11,6 +11,12 @@ Redis layout (all keys prefixed ``aegis:``):
 Refresh tokens rotate on every use: the presented token is atomically marked ``used`` and a
 new one is issued. Presenting a ``used`` token again means two parties hold it, so the whole
 family is revoked (every active refresh token plus every access token issued so far).
+
+Every login outcome is written to the audit chain in the same transaction as the lockout
+bookkeeping it goes with: ``auth.login`` (session about to be issued), ``auth.mfa.challenge``
+(password accepted, second factor pending) and ``auth.login.failed`` with an internal
+``reason``. Failures are recorded with no actor (the caller is unauthenticated); the reason is
+for investigators only, and the API still answers every failure with one generic message.
 """
 
 import hmac
@@ -40,7 +46,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import User
-from app.services import mfa_service
+from app.services import audit_chain, mfa_service
 
 MAX_FAILED_LOGINS = 5
 LOCKOUT_DURATION = timedelta(minutes=15)
@@ -103,62 +109,113 @@ def record_successful_login(user: User) -> None:
     user.locked_until = None
 
 
-def authenticate(db: Session, email: str, password: str) -> User:
-    """Verify email + password, enforcing lockout. Commits the attempt's outcome.
+def _audit_failure(
+    db: Session,
+    stage: str,
+    reason: str,
+    ip: str | None,
+    *,
+    user: User | None = None,
+    email: str | None = None,
+    locked: bool = False,
+) -> None:
+    payload: dict[str, Any] = {"stage": stage, "reason": reason, "ip": ip}
+    if email is not None:
+        payload["email"] = email
+    if locked:
+        payload["account_locked"] = True
+    resource = f"users/{user.id}" if user is not None else "auth"
+    audit_chain.append(db, None, "auth.login.failed", resource, payload)
 
-    Every path performs exactly one Argon2 verification, so response time does not reveal
-    whether the account exists, is locked, or is inactive. For MFA-enabled users the failure
-    counter is only reset once the second factor succeeds.
+
+def _audit_success(db: Session, action: str, user: User, method: str, ip: str | None) -> None:
+    audit_chain.append(db, user.id, action, f"users/{user.id}", {"method": method, "ip": ip})
+
+
+def authenticate(db: Session, email: str, password: str, ip: str | None = None) -> User:
+    """Verify email + password, enforcing lockout. Commits the attempt's outcome and its
+    audit entry.
+
+    Every path performs exactly one Argon2 verification and one audit append, so response
+    time does not reveal whether the account exists, is locked, or is inactive. For
+    MFA-enabled users the failure counter is only reset once the second factor succeeds.
     """
     now = datetime.now(UTC)
+    normalized = normalize_email(email)
     # Row lock serialises concurrent attempts so the failure counter cannot be raced past 5.
-    user = db.scalar(select(User).where(User.email == normalize_email(email)).with_for_update())
+    user = db.scalar(select(User).where(User.email == normalized).with_for_update())
     if user is None:
         verify_dummy_password(password)
+        _audit_failure(db, "password", "unknown_account", ip, email=normalized)
+        db.commit()
         raise AuthenticationError
 
     password_ok = verify_password(user.password_hash, password)
     if is_locked(user, now) or not user.is_active:
-        db.rollback()
+        reason = "account_locked" if is_locked(user, now) else "account_inactive"
+        _audit_failure(db, "password", reason, ip, user=user, email=normalized)
+        db.commit()
         raise AuthenticationError
     if not password_ok:
         record_failed_login(user, now)
+        _audit_failure(
+            db,
+            "password",
+            "invalid_password",
+            ip,
+            user=user,
+            email=normalized,
+            locked=is_locked(user, now),
+        )
         db.commit()
         raise AuthenticationError
 
     if password_needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
-    if not user.mfa_enabled:
+    if user.mfa_enabled:
+        _audit_success(db, "auth.mfa.challenge", user, "password", ip)
+    else:
         record_successful_login(user)
+        _audit_success(db, "auth.login", user, "password", ip)
     db.commit()
     return user
 
 
-def complete_mfa_login(db: Session, redis: Redis, mfa_token: str, code: str) -> User:
+def complete_mfa_login(
+    db: Session, redis: Redis, mfa_token: str, code: str, ip: str | None = None
+) -> User:
     """Exchange a valid, unused mfa_pending token plus a fresh TOTP code for the user."""
     try:
         claims = decode_token(mfa_token, TokenType.MFA_PENDING)
     except TokenError as exc:
+        _audit_failure(db, "mfa", "invalid_mfa_token", ip)
+        db.commit()
         raise AuthenticationError from exc
     used_key = key("mfa-pending-used", claims["jti"])
     if redis.exists(used_key):
+        _audit_failure(db, "mfa", "mfa_token_reused", ip)
+        db.commit()
         raise AuthenticationError
 
     now = datetime.now(UTC)
     user = db.scalar(select(User).where(User.id == subject_id(claims)).with_for_update())
     if user is None or not user.is_active or not user.mfa_enabled or is_locked(user, now):
-        db.rollback()
+        _audit_failure(db, "mfa", "account_unavailable", ip, user=user)
+        db.commit()
         raise AuthenticationError
     if not mfa_service.verify_totp(redis, user, code):
         # Wrong second factors count toward the same lockout as wrong passwords.
         record_failed_login(user, now)
+        _audit_failure(db, "mfa", "invalid_totp", ip, user=user, locked=is_locked(user, now))
         db.commit()
         raise AuthenticationError
     # Single use: a concurrent exchange of the same pending token loses here.
     if not redis.set(used_key, "1", nx=True, ex=max(1, seconds_until_expiry(claims))):
-        db.rollback()
+        _audit_failure(db, "mfa", "mfa_token_reused", ip, user=user)
+        db.commit()
         raise AuthenticationError
     record_successful_login(user)
+    _audit_success(db, "auth.login", user, "password+totp", ip)
     db.commit()
     return user
 

@@ -16,21 +16,27 @@ def test_defaults_match_policy() -> None:
     assert settings.rate_limit_enabled is True
 
 
-@pytest.mark.parametrize("var", ["JWT_SECRET", "BADGE_HMAC_SECRET", "MFA_ENCRYPTION_KEY"])
+@pytest.mark.parametrize(
+    "var", ["JWT_SECRET", "BADGE_HMAC_SECRET", "AUDIT_HMAC_SECRET", "MFA_ENCRYPTION_KEY"]
+)
 def test_short_secrets_rejected(monkeypatch: pytest.MonkeyPatch, var: str) -> None:
     monkeypatch.setenv(var, "x" * 31)
     with pytest.raises(ValidationError, match="at least 32 characters"):
         Settings()
 
 
-@pytest.mark.parametrize("var", ["JWT_SECRET", "BADGE_HMAC_SECRET", "MFA_ENCRYPTION_KEY"])
+@pytest.mark.parametrize(
+    "var", ["JWT_SECRET", "BADGE_HMAC_SECRET", "AUDIT_HMAC_SECRET", "MFA_ENCRYPTION_KEY"]
+)
 def test_missing_secrets_rejected(monkeypatch: pytest.MonkeyPatch, var: str) -> None:
     monkeypatch.delenv(var, raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
 
 
-@pytest.mark.parametrize("var", ["JWT_SECRET", "BADGE_HMAC_SECRET", "MFA_ENCRYPTION_KEY"])
+@pytest.mark.parametrize(
+    "var", ["JWT_SECRET", "BADGE_HMAC_SECRET", "AUDIT_HMAC_SECRET", "MFA_ENCRYPTION_KEY"]
+)
 def test_env_example_placeholders_rejected(monkeypatch: pytest.MonkeyPatch, var: str) -> None:
     # The .env.example placeholders are long enough to pass the length check on their own.
     monkeypatch.setenv(var, "CHANGE_ME_at_least_32_characters_long_random_value")
@@ -116,7 +122,13 @@ def test_migration_settings_load(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_migration_settings_do_not_need_api_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("JWT_SECRET", "BADGE_HMAC_SECRET", "MFA_ENCRYPTION_KEY", "APP_DATABASE_URL"):
+    for var in (
+        "JWT_SECRET",
+        "BADGE_HMAC_SECRET",
+        "AUDIT_HMAC_SECRET",
+        "MFA_ENCRYPTION_KEY",
+        "APP_DATABASE_URL",
+    ):
         monkeypatch.delenv(var, raising=False)
     assert MigrationSettings(_env_file=None).database_url
 

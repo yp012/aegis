@@ -28,8 +28,8 @@ def owner_engine() -> Iterator[Engine]:
     with eng.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO audit_logs (prev_hash, entry_hash, action, resource) "
-                "VALUES (repeat('0', 64), repeat('c', 64), 'system.init', 'audit_logs')"
+                "INSERT INTO audit_logs (id, prev_hash, entry_hash, action, resource) "
+                "VALUES (1, repeat('0', 64), repeat('c', 64), 'system.init', 'audit_logs')"
             )
         )
     try:
@@ -109,12 +109,42 @@ def test_audit_logs_privileges(owner_engine: Engine, privilege: str, expected: b
     assert held is expected
 
 
+@pytest.mark.parametrize(
+    ("privilege", "expected"),
+    [
+        ("SELECT", True),
+        ("INSERT", True),
+        ("UPDATE", True),
+        ("DELETE", False),
+        ("TRUNCATE", False),
+        ("TRIGGER", False),
+    ],
+)
+def test_audit_checkpoint_privileges(owner_engine: Engine, privilege: str, expected: bool) -> None:
+    # The app must move the head checkpoint forward, but may never remove it.
+    with owner_engine.connect() as conn:
+        held = conn.execute(
+            text("SELECT has_table_privilege(:r, 'audit_checkpoint', :p)"),
+            {"r": APP_ROLE, "p": privilege},
+        ).scalar_one()
+    assert held is expected
+
+
+def test_audit_ids_have_no_sequence(owner_engine: Engine) -> None:
+    with owner_engine.connect() as conn:
+        sequence = conn.execute(
+            text("SELECT pg_get_serial_sequence('audit_logs', 'id')")
+        ).scalar_one()
+    assert sequence is None
+
+
 def test_app_can_insert_and_select_audit_logs(app_engine: Engine) -> None:
     with app_engine.begin() as conn:
         new_id = conn.execute(
             text(
-                "INSERT INTO audit_logs (prev_hash, entry_hash, action, resource) "
-                "VALUES (repeat('c', 64), repeat('d', 64), 'user.login', 'users') RETURNING id"
+                "INSERT INTO audit_logs (id, prev_hash, entry_hash, action, resource) "
+                "VALUES (2, repeat('c', 64), repeat('d', 64), 'user.login', 'users') "
+                "RETURNING id"
             )
         ).scalar_one()
     with app_engine.connect() as conn:
@@ -136,6 +166,8 @@ def test_app_can_insert_and_select_audit_logs(app_engine: Engine) -> None:
         "ALTER TABLE audit_logs DISABLE TRIGGER audit_log_immutable",
         "ALTER TABLE audit_logs DISABLE TRIGGER ALL",
         "DROP TRIGGER audit_log_immutable ON audit_logs",
+        "DELETE FROM audit_checkpoint",
+        "TRUNCATE audit_checkpoint",
         "SET session_replication_role = replica",
         "CREATE TABLE public.shadow_audit (id int)",
         "SELECT version_num FROM alembic_version",

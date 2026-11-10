@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 import app.models  # noqa: F401  (registers all tables)
 from app.db.base import Base
-from app.models import AuditLog, ZoneAccessGrant
+from app.models import AuditCheckpoint, AuditLog, ZoneAccessGrant
 
 EXPECTED_TABLES = {
     "users",
@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "badges",
     "access_events",
     "audit_logs",
+    "audit_checkpoint",
 }
 
 
@@ -30,19 +31,32 @@ def test_all_tables_registered() -> None:
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 
 
-@pytest.mark.parametrize("table_name", sorted(EXPECTED_TABLES - {"audit_logs"}))
+@pytest.mark.parametrize("table_name", sorted(EXPECTED_TABLES - {"audit_logs", "audit_checkpoint"}))
 def test_uuid_primary_keys(table_name: str) -> None:
     (pk,) = Base.metadata.tables[table_name].primary_key.columns
     assert isinstance(pk.type, Uuid)
     assert pk.server_default is not None
 
 
-def test_audit_log_uses_bigint_identity_and_jsonb() -> None:
+def test_audit_log_uses_app_assigned_bigint_ids_and_jsonb() -> None:
     table = AuditLog.__table__
     assert table.c.id.type.__visit_name__ == "big_integer"
-    assert table.c.id.autoincrement is True
+    # Gapless ids come from audit_chain.append, never from a sequence.
+    assert table.c.id.autoincrement is False
+    assert table.c.id.server_default is None
+    assert "ck_audit_logs_id_positive" in _check_names("audit_logs")
     assert isinstance(table.c.payload.type, JSONB)
     assert table.c.entry_hash.unique is True
+
+
+def test_audit_checkpoint_is_a_constrained_singleton() -> None:
+    assert AuditCheckpoint.__table__.c.id.autoincrement is False
+    assert {
+        "ck_audit_checkpoint_singleton",
+        "ck_audit_checkpoint_head_id_positive",
+        "ck_audit_checkpoint_head_hash_is_sha256_hex",
+        "ck_audit_checkpoint_signature_is_hmac_sha256_hex",
+    } <= _check_names("audit_checkpoint")
 
 
 def test_every_datetime_is_timezone_aware() -> None:

@@ -9,7 +9,7 @@ responses do not reveal whether an account exists, is locked or is disabled.
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -24,7 +24,7 @@ from app.core.deps import (
     get_access_claims,
     get_current_user,
 )
-from app.core.rate_limit import auth_rate_limit
+from app.core.rate_limit import auth_rate_limit, client_ip
 from app.core.security import create_mfa_pending_token, hash_password
 from app.models.enums import Role
 from app.models.user import User
@@ -145,10 +145,10 @@ def register(
     dependencies=RateLimited,
 )
 def login(
-    payload: LoginRequest, response: Response, db: DbSession, redis: RedisClient
+    payload: LoginRequest, request: Request, response: Response, db: DbSession, redis: RedisClient
 ) -> TokenResponse | MfaChallengeResponse:
     try:
-        user = auth_service.authenticate(db, payload.email, payload.password)
+        user = auth_service.authenticate(db, payload.email, payload.password, client_ip(request))
     except AuthenticationError:
         raise _invalid_credentials() from None
     if user.mfa_enabled:
@@ -159,10 +159,16 @@ def login(
 
 @router.post("/mfa/login", response_model=TokenResponse, dependencies=RateLimited)
 def mfa_login(
-    payload: MfaLoginRequest, response: Response, db: DbSession, redis: RedisClient
+    payload: MfaLoginRequest,
+    request: Request,
+    response: Response,
+    db: DbSession,
+    redis: RedisClient,
 ) -> TokenResponse:
     try:
-        user = auth_service.complete_mfa_login(db, redis, payload.mfa_token, payload.code)
+        user = auth_service.complete_mfa_login(
+            db, redis, payload.mfa_token, payload.code, client_ip(request)
+        )
     except AuthenticationError:
         raise _invalid_credentials() from None
     return _token_response(response, auth_service.issue_session(redis, user))
@@ -215,11 +221,19 @@ def refresh(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(
-    claims: AccessClaims, user: CurrentUser, redis: RedisClient, refresh_token: RefreshCookie = None
+    request: Request,
+    claims: AccessClaims,
+    user: CurrentUser,
+    db: DbSession,
+    redis: RedisClient,
+    refresh_token: RefreshCookie = None,
 ) -> Response:
     auth_service.blacklist_access_token(redis, claims)
     if refresh_token:
         auth_service.revoke_refresh_token(redis, refresh_token, user.id)
+    # Recorded after revocation, so the trail never claims a logout that did not take effect.
+    audit_chain.append(db, user.id, "auth.logout", f"users/{user.id}", {"ip": client_ip(request)})
+    db.commit()
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
     _clear_refresh_cookie(response)
     return response

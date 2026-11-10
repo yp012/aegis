@@ -6,10 +6,12 @@ See tests/pg.py for how to enable these locally; they run against the schema own
 from collections.abc import Iterator
 
 import pytest
+from alembic.config import Config
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from tests.pg import integration, migrate, require_test_db_url, sqlstate
+from alembic import command
+from tests.pg import ALEMBIC_INI, integration, migrate, require_test_db_url, reset_data, sqlstate
 
 pytestmark = integration
 
@@ -33,8 +35,8 @@ def seeded(engine: Engine) -> Engine:
     with engine.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO audit_logs (prev_hash, entry_hash, action, resource) "
-                "VALUES (repeat('0', 64), repeat('a', 64), 'system.init', 'audit_logs')"
+                "INSERT INTO audit_logs (id, prev_hash, entry_hash, action, resource) "
+                "VALUES (1, repeat('0', 64), repeat('a', 64), 'system.init', 'audit_logs')"
             )
         )
     return engine
@@ -65,8 +67,8 @@ def test_audit_log_allows_insert(seeded: Engine) -> None:
     with seeded.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO audit_logs (prev_hash, entry_hash, action, resource) "
-                "VALUES (repeat('a', 64), repeat('b', 64), 'user.login', 'users')"
+                "INSERT INTO audit_logs (id, prev_hash, entry_hash, action, resource) "
+                "VALUES (2, repeat('a', 64), repeat('b', 64), 'user.login', 'users')"
             )
         )
     with seeded.connect() as conn:
@@ -108,6 +110,37 @@ def test_pg_clearance_ordering(engine: Engine) -> None:
     with engine.connect() as conn:
         labels = conn.execute(text("SELECT unnest(enum_range(NULL::clearance))::text")).scalars()
         assert list(labels) == ["Reliability", "Secret_Level_II", "Top_Secret"]
+
+
+def _step(engine: Engine, action: str, revision: str) -> None:
+    cfg = Config(str(ALEMBIC_INI))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        getattr(command, action)(cfg, revision)
+
+
+def test_checkpoint_migration_refuses_old_format_entries(engine: Engine) -> None:
+    reset_data(engine)
+    _step(engine, "downgrade", "495072b64b57")
+    # The downgrade restores the id sequence, so an id-less insert works again.
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO audit_logs (prev_hash, entry_hash, action, resource) "
+                "VALUES (repeat('0', 64), repeat('a', 64), 'legacy', 'audit_logs')"
+            )
+        )
+    with pytest.raises(RuntimeError, match="pre-checkpoint hash format"):
+        _step(engine, "upgrade", "head")
+
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE audit_logs DISABLE TRIGGER audit_log_immutable"))
+        conn.execute(text("TRUNCATE audit_logs"))
+        conn.execute(text("ALTER TABLE audit_logs ENABLE TRIGGER audit_log_immutable"))
+    _step(engine, "upgrade", "head")
+    with engine.connect() as conn:
+        sequence = conn.execute(text("SELECT pg_get_serial_sequence('audit_logs', 'id')"))
+        assert sequence.scalar_one() is None
 
 
 def test_downgrade_then_upgrade_round_trips(engine: Engine) -> None:

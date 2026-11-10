@@ -478,3 +478,103 @@ def test_unused_id_in_token_is_rejected(api: TestClient) -> None:
 
     token = create_refresh_token(uuid.uuid4()).token
     assert api.post(f"{AUTH}/refresh", headers=_refresh_cookie(token)).status_code == 401
+
+
+# --- Audit trail of authentication events --------------------------------------------------
+
+
+def _auth_events(owner_engine: Engine) -> list[tuple[str | None, str, str, dict[str, object]]]:
+    with owner_engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT actor_id::text, action, resource, payload FROM audit_logs "
+                "WHERE action LIKE 'auth.%' ORDER BY id"
+            )
+        ).all()
+    return [(r[0], r[1], r[2], r[3]) for r in rows]
+
+
+def _user_id(owner_engine: Engine, email: str) -> str:
+    with owner_engine.connect() as conn:
+        user_id: str = conn.execute(
+            text("SELECT id::text FROM users WHERE email = :e"), {"e": email}
+        ).scalar_one()
+    return user_id
+
+
+def test_login_and_logout_are_audited(api: TestClient, owner_engine: Engine) -> None:
+    login = _user_with_login(api)
+    user_id = _user_id(owner_engine, "user@example.com")
+    out = api.post(f"{AUTH}/logout", headers=_bearer(login.json()["access_token"]))
+    assert out.status_code == 204
+
+    events = _auth_events(owner_engine)
+    assert [e[1] for e in events] == ["auth.login", "auth.login", "auth.logout"]
+    assert events[1] == (
+        user_id,
+        "auth.login",
+        f"users/{user_id}",
+        {"method": "password", "ip": "testclient"},
+    )
+    assert events[2] == (user_id, "auth.logout", f"users/{user_id}", {"ip": "testclient"})
+
+
+def test_failed_logins_are_audited_without_an_actor(api: TestClient, owner_engine: Engine) -> None:
+    _admin(api)
+    admin_id = _user_id(owner_engine, "admin@example.com")
+    assert _login(api, "nobody@example.com").status_code == 401
+    for _ in range(5):
+        assert _login(api, "ADMIN@example.com", "wrong-password").status_code == 401
+    assert _login(api, "admin@example.com").status_code == 401  # now locked
+
+    failures = [e for e in _auth_events(owner_engine) if e[1] == "auth.login.failed"]
+    assert all(actor is None for actor, *_ in failures)
+    assert failures[0][2:] == (
+        "auth",
+        {
+            "stage": "password",
+            "reason": "unknown_account",
+            "ip": "testclient",
+            "email": "nobody@example.com",
+        },
+    )
+    reasons = [e[3]["reason"] for e in failures[1:]]
+    assert reasons == ["invalid_password"] * 5 + ["account_locked"]
+    assert all(e[2] == f"users/{admin_id}" for e in failures[1:])
+    assert [e[3].get("account_locked", False) for e in failures[1:6]] == [False] * 4 + [True]
+
+
+def test_inactive_login_attempt_is_audited(api: TestClient, owner_engine: Engine) -> None:
+    _user_with_login(api)
+    with owner_engine.begin() as conn:
+        conn.execute(text("UPDATE users SET is_active = false WHERE email = 'user@example.com'"))
+    assert _login(api, "user@example.com").status_code == 401
+    assert _auth_events(owner_engine)[-1][3]["reason"] == "account_inactive"
+
+
+def test_mfa_login_steps_are_audited(api: TestClient, owner_engine: Engine) -> None:
+    access = _user_with_login(api).json()["access_token"]
+    totp = _enroll_mfa(api, access)
+    user_id = _user_id(owner_engine, "user@example.com")
+
+    garbage = api.post(f"{AUTH}/mfa/login", json={"mfa_token": "x.y.z", "code": "123456"})
+    assert garbage.status_code == 401
+    pending = _mfa_challenge(api)
+    wrong = api.post(f"{AUTH}/mfa/login", json={"mfa_token": pending, "code": _wrong_code(totp)})
+    assert wrong.status_code == 401
+    ok = api.post(f"{AUTH}/mfa/login", json={"mfa_token": pending, "code": _code_at(totp, 30)})
+    assert ok.status_code == 200
+    reused = api.post(f"{AUTH}/mfa/login", json={"mfa_token": pending, "code": totp.now()})
+    assert reused.status_code == 401
+
+    tail = [
+        (e[0], e[1], e[3].get("reason") or e[3].get("method"))
+        for e in _auth_events(owner_engine)[-5:]
+    ]
+    assert tail == [
+        (None, "auth.login.failed", "invalid_mfa_token"),
+        (user_id, "auth.mfa.challenge", "password"),
+        (None, "auth.login.failed", "invalid_totp"),
+        (user_id, "auth.login", "password+totp"),
+        (None, "auth.login.failed", "mfa_token_reused"),
+    ]

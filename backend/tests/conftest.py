@@ -19,6 +19,7 @@ os.environ.setdefault("APP_DB_PASSWORD", "test-app-db-password-at-least-32-chars
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-key-that-is-at-least-32-chars")
 os.environ.setdefault("BADGE_HMAC_SECRET", "test-badge-hmac-secret-at-least-32-chars")
+os.environ.setdefault("AUDIT_HMAC_SECRET", "test-audit-hmac-secret-at-least-32-chars")
 # Fixed, test-only Fernet key (32 zero-bytes, base64url). Never use outside tests.
 os.environ.setdefault("MFA_ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 

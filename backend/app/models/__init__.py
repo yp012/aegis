@@ -4,7 +4,7 @@ Importing this package registers every model on ``Base.metadata`` (used by Alemb
 """
 
 from app.models.access_event import AccessEvent
-from app.models.audit import GENESIS_HASH, AuditLog
+from app.models.audit import GENESIS_HASH, AuditCheckpoint, AuditLog
 from app.models.badge import Badge
 from app.models.enums import (
     AccessResult,
@@ -23,6 +23,7 @@ __all__ = [
     "GENESIS_HASH",
     "AccessEvent",
     "AccessResult",
+    "AuditCheckpoint",
     "AuditLog",
     "Badge",
     "Clearance",

@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     badge_hmac_secret: SecretStr
     badge_ttl_minutes: int = Field(default=480, ge=1, le=60 * 24)
 
+    audit_hmac_secret: SecretStr = Field(
+        description="HMAC-SHA256 key signing the audit chain's head checkpoint.",
+    )
+
     mfa_encryption_key: SecretStr = Field(
         description="URL-safe base64 Fernet key used to encrypt TOTP secrets at rest.",
     )
@@ -76,7 +80,7 @@ class Settings(BaseSettings):
     rate_limit_login_requests: int = Field(default=5, ge=1)
     rate_limit_login_window_seconds: int = Field(default=60, ge=1)
 
-    @field_validator("jwt_secret", "badge_hmac_secret", "mfa_encryption_key")
+    @field_validator("jwt_secret", "badge_hmac_secret", "audit_hmac_secret", "mfa_encryption_key")
     @classmethod
     def _secret_min_length(cls, value: SecretStr) -> SecretStr:
         _check_secret(value.get_secret_value())
